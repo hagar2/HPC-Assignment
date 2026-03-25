@@ -1,0 +1,3 @@
+/home/sara/project3_image_filter/build/CMakeFiles/image_filter.dir
+/home/sara/project3_image_filter/build/CMakeFiles/edit_cache.dir
+/home/sara/project3_image_filter/build/CMakeFiles/rebuild_cache.dir
