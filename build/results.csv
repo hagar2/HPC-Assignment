@@ -1,3 +1,0 @@
-filter,impl,rows,cols,kernel,threads,block_x,block_y,time_ms,speedup
-gaussian,cuda,900,1600,3,4,16,16,84.8687,1.0
-gaussian,serial,900,1600,15,4,16,16,585.367,1.0

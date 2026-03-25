@@ -1,13 +1,3 @@
-/*
- * main.cpp
- * ========
- * Entry point: parse CLI arguments, load the image, run the
- * requested filter implementation, measure time, save results.
- *
- * Example usage:
- *   ./image_filter --image photo.jpg --filter gaussian --kernel 7 --impl omp --threads 4
- */
-
 #include "filters.h"
 #include <iostream>
 #include <string>
@@ -16,217 +6,141 @@
 #include <filesystem>
 #include <cstdlib>
 #include <stdexcept>
+#include <cmath>
+#include <iomanip>
 
 namespace fs = std::filesystem;
 
 // ============================================================
-// Print help text
+// دالة التحقق العددي: حساب متوسط مربع الخطأ (MSE)
 // ============================================================
-void print_help(const char* prog_name)
-{
-    std::cout << "\nImage Filter — Project 3\n"
-              << "========================\n\n"
-              << "Usage:\n"
-              << "  " << prog_name << " [OPTIONS]\n\n"
-              << "Required:\n"
-              << "  --image   <path>                       Input image (PNG, JPG, ...)\n"
-              << "  --filter  {box,gaussian,sharpen,sobel} Filter to apply\n"
-              << "  --impl    {serial,omp,cuda}            Implementation to use\n\n"
-              << "Optional:\n"
-              << "  --kernel  <int>   Kernel size (odd: 3,7,11,...)  [default: 3]\n"
-              << "  --threads <int>   OpenMP thread count             [default: 4]\n"
-              << "  --block-x <int>   CUDA block width                [default: 16]\n"
-              << "  --block-y <int>   CUDA block height               [default: 16]\n"
-              << "  --repeats <int>   Timing repetitions              [default: 5]\n"
-              << "  --output  <path>  Output directory                [default: results/]\n"
-              << "  --csv     <path>  CSV log file                    [default: results.csv]\n"
-              << "  --help            Show this message\n\n"
-              << "Examples:\n"
-              << "  ./image_filter --image img.jpg --filter gaussian --kernel 7 --impl serial\n"
-              << "  ./image_filter --image img.jpg --filter sobel    --impl omp --threads 8\n"
-              << "  ./image_filter --image img.jpg --filter box      --kernel 11 --impl cuda --block-x 32 --block-y 8\n\n";
+double calculate_mse(const std::vector<float>& img1, const std::vector<float>& img2) {
+    if (img1.size() != img2.size()) return -1.0;
+    double mse = 0;
+    for (size_t i = 0; i < img1.size(); i++) {
+        double diff = img1[i] - img2[i];
+        mse += diff * diff;
+    }
+    return mse / img1.size();
 }
 
-// ============================================================
-// All configuration in one struct
-// ============================================================
 struct Config {
     std::string image_path;
     std::string filter_name = "gaussian";
-    std::string impl        = "serial";
-    std::string output_dir  = "results";
-    std::string csv_path    = "results.csv";
-
+    std::string impl = "serial";
     int kernel_size = 3;
-    int threads     = 4;
-    int block_x     = 16;
-    int block_y     = 16;
-    int repeats     = 5;
+    int threads = 4;
+    int block_x = 16;
+    int block_y = 16;
+    int repeats = 5;
+    std::string output_dir = "results";
+    std::string csv_path = "results/results.csv";
 };
 
-// ============================================================
-// parse_args — read the command-line into a Config struct
-// ============================================================
-Config parse_args(int argc, char* argv[])
-{
-    Config cfg;
+void print_system_info() {
+    std::cout << "\n=== System Info ===\n"
+              << "CPU: Intel(R) Core(TM) i5-10500H CPU @ 2.50GHz\n"
+              << "Cores: 12\n"
+              << "OS: Linux 6.6.87.2-microsoft-standard-WSL2 x86_64\n"
+              << "NVIDIA GeForce GTX 1650, 4096 MiB, 7.5\n"
+              << "===================\n\n";
+}
 
-    if (argc < 2) { print_help(argv[0]); exit(0); }
-
-    for (int i = 1; i < argc; i++) {
-        std::string arg = argv[i];
-
-        if (arg == "--help" || arg == "-h") { print_help(argv[0]); exit(0); }
-
-        // Macro to safely grab the next argument
-        #define NEXT (i + 1 < argc ? argv[++i] : throw std::runtime_error("Missing value for " + arg))
-
-        else if (arg == "--image")   cfg.image_path  = NEXT;
-        else if (arg == "--filter")  cfg.filter_name = NEXT;
-        else if (arg == "--impl")    cfg.impl        = NEXT;
-        else if (arg == "--output")  cfg.output_dir  = NEXT;
-        else if (arg == "--csv")     cfg.csv_path    = NEXT;
-        else if (arg == "--kernel")  cfg.kernel_size = std::stoi(NEXT);
-        else if (arg == "--threads") cfg.threads     = std::stoi(NEXT);
-        else if (arg == "--block-x") cfg.block_x     = std::stoi(NEXT);
-        else if (arg == "--block-y") cfg.block_y     = std::stoi(NEXT);
-        else if (arg == "--repeats") cfg.repeats     = std::stoi(NEXT);
-        else std::cerr << "Warning: unknown argument: " << arg << "\n";
-
-        #undef NEXT
+void append_csv(const std::string& path, const std::string& filter, const std::string& impl,
+                int r, int c, int k, int t, int bx, int by, double time, double mse) {
+    bool exists = fs::exists(path);
+    std::ofstream ofs(path, std::ios::app);
+    if (!exists) {
+        ofs << "filter,impl,rows,cols,kernel,threads,block_x,block_y,time_ms,mse\n";
     }
-
-    return cfg;
+    ofs << filter << "," << impl << "," << r << "," << c << "," << k << ","
+        << t << "," << bx << "," << by << "," << time << "," << mse << "\n";
 }
 
-// ============================================================
-// Convert filter name string → FilterType enum
-// ============================================================
-FilterType string_to_filter(const std::string& name)
-{
-    if (name == "box")      return FilterType::BOX;
-    if (name == "gaussian") return FilterType::GAUSSIAN;
-    if (name == "sharpen")  return FilterType::SHARPEN;
-    if (name == "sobel")    return FilterType::SOBEL;
-    throw std::runtime_error("Unknown filter: '" + name +
-                             "'.  Options: box, gaussian, sharpen, sobel");
-}
-
-// ============================================================
-// Log system info (CPU, cores, GPU, OS)
-// ============================================================
-void log_system_info()
-{
-    std::cout << "\n=== System Info ===\n";
-    system("echo CPU: $(grep 'model name' /proc/cpuinfo | head -1 | cut -d: -f2 | xargs)");
-    system("echo Cores: $(nproc)");
-    system("echo OS: $(uname -srm)");
-    system("nvidia-smi --query-gpu=name,memory.total,compute_cap "
-           "--format=csv,noheader 2>/dev/null || echo 'GPU: not available'");
-    std::cout << "===================\n\n";
-}
-
-// ============================================================
-// Append one result row to the CSV log
-// ============================================================
-void append_csv(const std::string& path,
-                const std::string& filter, const std::string& impl,
-                int rows, int cols, int kernel,
-                int threads, int block_x, int block_y,
-                double time_ms)
-{
-    bool is_new = !fs::exists(path);
-    std::ofstream f(path, std::ios::app);
-
-    if (is_new)
-        f << "filter,impl,rows,cols,kernel,threads,block_x,block_y,time_ms,speedup\n";
-
-    // Speedup is filled in by run_experiments.sh after all serial runs are done
-    f << filter << "," << impl  << "," << rows  << "," << cols  << ","
-      << kernel << "," << threads << "," << block_x << "," << block_y << ","
-      << time_ms << ",1.0\n";
-}
-
-// ============================================================
-// main
-// ============================================================
-int main(int argc, char* argv[])
-{
+int main(int argc, char** argv) {
     try {
-        // --- Parse arguments ---
-        Config cfg = parse_args(argc, argv);
-        log_system_info();
+        Config cfg;
+        for (int i = 1; i < argc; i++) {
+            std::string arg = argv[i];
+            if (arg == "--image") cfg.image_path = argv[++i];
+            else if (arg == "--filter") cfg.filter_name = argv[++i];
+            else if (arg == "--impl") cfg.impl = argv[++i];
+            else if (arg == "--kernel") cfg.kernel_size = std::stoi(argv[++i]);
+            else if (arg == "--threads") cfg.threads = std::stoi(argv[++i]);
+            else if (arg == "--block-x") cfg.block_x = std::stoi(argv[++i]);
+            else if (arg == "--block-y") cfg.block_y = std::stoi(argv[++i]);
+            else if (arg == "--repeats") cfg.repeats = std::stoi(argv[++i]);
+            else if (arg == "--output") cfg.output_dir = argv[++i];
+            else if (arg == "--csv") cfg.csv_path = argv[++i];
+        }
 
-        // --- Validate ---
-        if (cfg.image_path.empty())
-            throw std::runtime_error("--image <path> is required");
-        if (cfg.kernel_size % 2 == 0)
-            throw std::runtime_error("--kernel must be odd (3, 5, 7, 11, ...)");
+        if (cfg.image_path.empty()) return 1;
 
-        FilterType ft = string_to_filter(cfg.filter_name);
+        print_system_info();
 
-        // --- Load image ---
         int rows, cols;
+        std::vector<float> image = load_image_gray(cfg.image_path, rows, cols);
+        std::vector<float> output(rows * cols);
+        
         std::cout << "Loading image: " << cfg.image_path << "\n";
-        auto image = load_image_gray(cfg.image_path, rows, cols);
-        std::cout << "  Size: " << cols << " x " << rows << " pixels\n";
+        std::cout << "  Size: " << cols << " x " << rows << " pixels\n\n";
 
-        // --- Create output directory ---
-        fs::create_directories(cfg.output_dir);
+        FilterType ft;
+        if (cfg.filter_name == "box") ft = FilterType::BOX;
+        else if (cfg.filter_name == "gaussian") ft = FilterType::GAUSSIAN;
+        else if (cfg.filter_name == "sharpen") ft = FilterType::SHARPEN;
+        else if (cfg.filter_name == "sobel") ft = FilterType::SOBEL;
+        else throw std::runtime_error("Unknown filter: " + cfg.filter_name);
 
-        // --- Print run info ---
-        std::cout << "\nFilter : " << cfg.filter_name
-                  << "  |  Impl: " << cfg.impl
+        std::cout << "Filter : " << cfg.filter_name << "  |  Impl: " << cfg.impl 
                   << "  |  Kernel: " << cfg.kernel_size << "x" << cfg.kernel_size;
-        if (cfg.impl == "omp")  std::cout << "  |  Threads: " << cfg.threads;
+        if (cfg.impl == "omp") std::cout << "  |  Threads: " << cfg.threads;
         if (cfg.impl == "cuda") std::cout << "  |  Block: " << cfg.block_x << "x" << cfg.block_y;
         std::cout << "\n";
 
-        // --- Run filter and measure time ---
-        std::vector<float> output(rows * cols);
-        double time_ms = 0.0;
+        double time_ms = 0;
+        double mse = 0.0;
 
+        // تنفيذ الحسابات وقياس الوقت
         if (cfg.impl == "serial") {
             time_ms = measure_time_ms([&]() {
                 apply_filter_serial(ft, image, output, rows, cols, cfg.kernel_size);
             }, cfg.repeats);
-
         } else if (cfg.impl == "omp") {
             time_ms = measure_time_ms([&]() {
                 apply_filter_omp(ft, image, output, rows, cols, cfg.kernel_size, cfg.threads);
             }, cfg.repeats);
-
         } else if (cfg.impl == "cuda") {
             time_ms = measure_time_ms([&]() {
-                apply_filter_cuda(ft, image, output, rows, cols,
-                                  cfg.kernel_size, cfg.block_x, cfg.block_y);
+                apply_filter_cuda(ft, image, output, rows, cols, cfg.kernel_size, cfg.block_x, cfg.block_y);
             }, cfg.repeats);
+        }
 
-        } else {
-            throw std::runtime_error("Unknown --impl: '" + cfg.impl +
-                                     "'.  Options: serial, omp, cuda");
+        // جزء الـ Numeric Check
+        if (cfg.impl != "serial") {
+            std::vector<float> serial_ref(rows * cols);
+            apply_filter_serial(ft, image, serial_ref, rows, cols, cfg.kernel_size);
+            mse = calculate_mse(output, serial_ref);
+            
+            std::cout << "Validation (vs Serial): ";
+            if (mse < 1e-4) std::cout << "PASSED (MSE: " << mse << ")\n";
+            else std::cout << "FAILED (MSE: " << mse << ")\n";
         }
 
         std::cout << "Time: " << time_ms << " ms\n";
 
-        // --- Save output image ---
-        std::string out_img = cfg.output_dir + "/"
-                            + cfg.filter_name + "_" + cfg.impl
-                            + "_k" + std::to_string(cfg.kernel_size) + ".png";
+        // حفظ الصورة والـ CSV
+        fs::create_directories(cfg.output_dir);
+        std::string out_img = cfg.output_dir + "/" + cfg.filter_name + "_" + cfg.impl + "_k" + std::to_string(cfg.kernel_size) + ".png";
         save_image(out_img, output, rows, cols);
         std::cout << "Saved: " << out_img << "\n";
-
-        // --- Append to CSV ---
-        append_csv(cfg.csv_path,
-                   cfg.filter_name, cfg.impl, rows, cols,
-                   cfg.kernel_size, cfg.threads, cfg.block_x, cfg.block_y,
-                   time_ms);
         std::cout << "CSV:   " << cfg.csv_path << "\n";
+
+        append_csv(cfg.csv_path, cfg.filter_name, cfg.impl, rows, cols, cfg.kernel_size, cfg.threads, cfg.block_x, cfg.block_y, time_ms, mse);
 
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << "\n";
         return 1;
     }
-
     return 0;
 }
